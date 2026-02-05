@@ -1,0 +1,23 @@
+# 🏙️ 서울 슬세권 지수 대시보드 배포를 위한 의존성 파일
+
+# 웹 대시보드 프레임워크
+streamlit
+
+# 데이터 처리 및 분석용 라이브러리
+pandas
+
+# 지도 시각화 라이브러리 및 Streamlit 연동 컴포넌트
+folium
+streamlit-folium
+
+# 인터랙티브 차트 시각화 라이브러리
+plotly
+
+# 지리 데이터 거리 계산용 라이브러리
+geopy
+
+# HTTP 요청 처리 (카카오 API 호출용)
+requests
+
+# .env 파일 환경 변수 로드용
+python-dotenv
