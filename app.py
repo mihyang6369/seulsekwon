@@ -26,19 +26,20 @@ CARD_BG = "#ffffff"
 
 EMOJI_MAP = {
     "스타벅스": "☕", "편의점": "🏪", "세탁소": "🏪", "마트": "🏪", "대형마트": "🏬",
-    "백화점": "🏬", "버스정류장": "🚌", "지하철역": "🚇", "병원": "🏥", "의원": "💊",
-    "약국": "💊", "경찰서": "🚓", "파출소": "🚓", "도서관": "📚", "서점": "📚",
-    "학교": "🏫", "공원": "🌳", "체육시설": "🏋️", "은행": "🏦", "금융": "🏦"
+    "백화점": "🏬", "버스": "🚌", "bus": "🚌", "정류장": "🚌", "정류소": "🚌",
+    "지하철": "🚇", "metro": "🚇", "역": "🚇", "병원": "🏥", "의원": "💊",
+    "약국": "💊", "경찰": "🚓", "파출소": "🚓", "도서관": "📚", "서점": "📚",
+    "학교": "🏫", "공원": "🌳", "park": "🌳", "체육": "🏋️", "운동": "🏋️", "은행": "🏦", "금융": "🏦"
 }
 
 CATEGORY_GROUPS = {
-    "생활/편의🏪": ["스타벅스", "편의점", "세탁소", "마트", "대형마트", "백화점"],
-    "교통🚌": ["버스정류장", "지하철역"],
-    "의료💊": ["병원", "의원", "약국"],
-    "안전/치안🚨": ["경찰서", "파출소"],
-    "교육/문화📚": ["도서관", "서점", "학교"],
-    "자연/여가🌳": ["공원", "체육시설"],
-    "금융🏦": ["은행", "금융"]
+    "생활/편의🏪": ["스타벅스", "편의점", "세탁소", "마트", "대형마트", "백화점", "카페"],
+    "교통🚌": ["버스", "지하철", "정류장", "정류소", "역", "bus", "metro"],
+    "의료💊": ["병원", "의원", "약국", "치과", "한의원"],
+    "안전/치안🚨": ["경찰", "파출소", "소방"],
+    "교육/문화📚": ["도서관", "서점", "학교", "유치원", "학원"],
+    "자연/여가🌳": ["공원", "체육", "운동", "산책", "park"],
+    "금융🏦": ["은행", "금융", "ATM"]
 }
 
 st.markdown(f"""
@@ -126,19 +127,24 @@ def load_all_data():
                 except: continue
             
             if df is not None:
-                # 서브 카테고리 결정 로직 강화
-                if '카테고리_소' in df.columns: df['sub_category'] = df['카테고리_소']
-                elif '업태구분명' in df.columns: df['sub_category'] = df['업태구분명']
-                else: df['sub_category'] = default_cat
+                # 서브 카테고리 결정 로직 강화 (NaN 처리 포함)
+                if '카테고리_소' in df.columns:
+                    df['sub_category'] = df['카테고리_소'].fillna(default_cat)
+                elif '업태구분명' in df.columns:
+                    df['sub_category'] = df['업태구분명'].fillna(default_cat)
+                else:
+                    df['sub_category'] = default_cat
+                
+                # 빈 문자열 처리
+                df['sub_category'] = df['sub_category'].replace('', default_cat)
                 
                 lat_c = next((c for c in lat_names if c in df.columns), None)
                 lon_c = next((c for c in lon_names if c in df.columns), None)
                 name_c = next((c for c in name_names if c in df.columns), None)
 
                 if lat_c and lon_c:
-                    # 이름 컬럼이 없으면 가장 앞에 있는 일반 텍스트 컬럼 사용
                     if not name_c: 
-                        name_c = next((c for c in df.columns if '명' in str(c) or '이름' in str(c)), df.columns[0])
+                        name_c = next((c for c in df.columns if any(k in str(c) for k in ['명', '이름', '역', '정류'])), df.columns[0])
                     
                     temp_df = df[[name_c, lat_c, lon_c, 'sub_category']].copy()
                     temp_df.columns = ['name', 'lat', 'lon', 'sub_category']
@@ -146,9 +152,9 @@ def load_all_data():
                     temp_df['lon'] = pd.to_numeric(temp_df['lon'], errors='coerce')
                     temp_df = temp_df.dropna(subset=['lat', 'lon'])
                     
-                    # WGS84 좌표계 필터링 (서울 지역 위주)
-                    mask = (temp_df['lat'] > 33) & (temp_df['lat'] < 40) & \
-                           (temp_df['lon'] > 124) & (temp_df['lon'] < 132)
+                    # 좌표 필터링 범위 최적화 및 이상치 제거 (위도 37~38, 경도 126~128 사이 집중)
+                    mask = (temp_df['lat'] > 36.0) & (temp_df['lat'] < 39.0) & \
+                           (temp_df['lon'] > 125.0) & (temp_df['lon'] < 129.0)
                     temp_df = temp_df[mask]
                     
                     if not temp_df.empty:
@@ -157,7 +163,7 @@ def load_all_data():
     return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
 
 def calculate_seulsekwon_index(center_lat, center_lon, data, weights, radius_m):
-    if data.empty: return 0.0, {cat: 0.0 for cat in CATEGORY_GROUPS.keys()}, {cat: 0 for cat in CATEGORY_GROUPS.keys()}, []
+    if data.empty: return 0.0, {cat: 0.0 for cat in CATEGORY_GROUPS.keys()}, {cat: 0 for cat in CATEGORY_GROUPS.keys()}, [], {cat: 0.0 for cat in CATEGORY_GROUPS.keys()}
     radius_km = radius_m / 1000.0
     # 기준치 현실화 (도심 내 500m 반경 기준)
     max_counts = {"생활/편의🏪": 15, "교통🚌": 8, "의료💊": 5, "안전/치안🚨": 1, "교육/문화📚": 2, "자연/여가🌳": 2, "금융🏦": 3}
@@ -167,9 +173,10 @@ def calculate_seulsekwon_index(center_lat, center_lon, data, weights, radius_m):
            (data['lon'] >= center_lon - lon_margin) & (data['lon'] <= center_lon + lon_margin)
     filtered = data[mask].copy()
 
-    scores, counts, nearby = {}, {}, []
+    scores, counts, nearby, raw_scores = {}, {}, [], {}
     for g_name, sub_cats in CATEGORY_GROUPS.items():
-        g_data = filtered[filtered['sub_category'].apply(lambda x: any(sc in str(x) for sc in sub_cats))]
+        # 대소문자 무시 및 부분 일치 검색 강화
+        g_data = filtered[filtered['sub_category'].apply(lambda x: any(str(sc).lower() in str(x).lower() for sc in sub_cats))]
         actual_count = 0
         for _, row in g_data.iterrows():
             dist = geodesic((center_lat, center_lon), (row['lat'], row['lon'])).meters
@@ -180,19 +187,41 @@ def calculate_seulsekwon_index(center_lat, center_lon, data, weights, radius_m):
                 nearby.append(r_dict)
         counts[g_name] = actual_count
         m = max_counts.get(g_name, 5)
-        scores[g_name] = round((min(actual_count, m) / m) * weights.get(g_name, 0), 2)
+        rate = min(actual_count, m) / m
+        raw_scores[g_name] = rate
+        scores[g_name] = round(rate * weights.get(g_name, 0), 2)
+    
+    # 가까운 시설 우선 표시를 위해 거리순 정렬
+    nearby = sorted(nearby, key=lambda x: x['distance'])
     
     total = round(sum(scores.values()), 1)
-    return total, scores, counts, nearby
+    return total, scores, counts, nearby, raw_scores
 
-def create_visualizations(total_score, scores, counts, facilities, dong_name):
+def create_visualizations(total_score, scores, counts, facilities, dong_name, raw_scores):
     layout_opts = dict(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(family="Inter", color=SECONDARY_COLOR))
-    fig_radar = go.Figure(go.Scatterpolar(
-        r=list(scores.values()) + [list(scores.values())[0]],
-        theta=list(scores.keys()) + [list(scores.keys())[0]],
-        fill='toself', fillcolor='rgba(99, 102, 241, 0.2)', line=dict(color=ACCENT_COLOR, width=3)
+    
+    fig_radar = go.Figure()
+    fig_radar.add_trace(go.Scatterpolar(
+        r=[v * 100 for v in raw_scores.values()] + [list(raw_scores.values())[0] * 100],
+        theta=list(raw_scores.keys()) + [list(raw_scores.keys())[0]],
+        fill='toself',
+        fillcolor='rgba(99, 102, 241, 0.25)',
+        line=dict(color=ACCENT_COLOR, width=3),
+        name='카테고리 달성률'
     ))
-    fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 35])), showlegend=False, **layout_opts)
+
+    fig_radar.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                tickvals=[0, 25, 50, 75, 100],
+                ticktext=["0%", "25%", "50%", "75%", "100%"]
+            )
+        ),
+        showlegend=False,
+        **layout_opts
+    )
     
     fig_gauge = go.Figure(go.Indicator(
         mode="gauge+number", value=total_score, title={'text': "슬세권 종합 지수"},
@@ -214,7 +243,8 @@ def create_enhanced_map(lat, lon, facilities, radius_m):
     m = folium.Map(location=[lat, lon], zoom_start=16, tiles="cartodbpositron")
     folium.Circle([lat, lon], radius=radius_m, color=PRIMARY_COLOR, fill=True, fill_opacity=0.1).add_to(m)
     folium.Marker([lat, lon], icon=folium.Icon(color='red', icon='home', prefix='fa'), tooltip="분석 지점").add_to(m)
-    for f in facilities[:200]:
+    # 지도에 표시할 시설물 개수 상향 (최대 500개) 및 카테고리별 분산 배치
+    for f in facilities[:500]:
         html = f'<div style="font-size: 16px; background: white; border-radius: 50%; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 5px rgba(0,0,0,0.2); border: 2.5px solid {ACCENT_COLOR};">{f["emoji"]}</div>'
         folium.Marker([f['lat'], f['lon']], icon=folium.DivIcon(html=html), popup=f"<b>{f['name']}</b><br>{f['distance']:.0f}m").add_to(m)
     return m
@@ -271,11 +301,11 @@ if st.session_state.address:
         if st.button("🔄 엔진 재부팅 (캐시 삭제)"):
             st.cache_data.clear(); st.rerun()
 
-    t_score, scores, counts, facilities = calculate_seulsekwon_index(
+    t_score, scores, counts, facilities, raw_scores = calculate_seulsekwon_index(
         st.session_state.coords[0], st.session_state.coords[1], st.session_state.data, st.session_state.weights, st.session_state.radius
     )
     dong = get_dong_name(st.session_state.address)
-    viz = create_visualizations(t_score, scores, counts, facilities, dong)
+    viz = create_visualizations(t_score, scores, counts, facilities, dong, raw_scores)
 
     # 지수 카드 및 주요 차트
     c1, c2, c3 = st.columns([1.1, 1, 0.9])
