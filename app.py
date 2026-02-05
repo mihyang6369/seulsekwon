@@ -42,6 +42,8 @@ CATEGORY_GROUPS = {
     "금융🏦": ["은행", "금융", "ATM"]
 }
 
+DEFAULT_WEIGHTS = {"생활/편의🏪": 30, "교통🚌": 20, "의료💊": 15, "안전/치안🚨": 10, "교육/문화📚": 5, "자연/여가🌳": 15, "금융🏦": 5}
+
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
@@ -160,7 +162,20 @@ def load_all_data():
                     if not temp_df.empty:
                         all_dfs.append(temp_df)
     
-    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+    if not all_dfs: return pd.DataFrame()
+    
+    full_df = pd.concat(all_dfs, ignore_index=True)
+    
+    # 중복 제거 고도화: 이름과 좌표(소수점 4자리까지)가 동일한 경우 중복으로 간주
+    # 소수점 4자리는 약 11m 오차범위로, 같은 시설물이 중복 등록된 경우를 효과적으로 잡아냅니다.
+    full_df['lat_round'] = full_df['lat'].round(4)
+    full_df['lon_round'] = full_df['lon'].round(4)
+    
+    # 이름과 반올림된 좌표가 모두 같은 데이터 제거 (첫 번째 데이터 유지)
+    deduped_df = full_df.drop_duplicates(subset=['name', 'lat_round', 'lon_round'], keep='first')
+    
+    # 임시 컬럼 삭제 후 반환
+    return deduped_df.drop(columns=['lat_round', 'lon_round'])
 
 def calculate_seulsekwon_index(center_lat, center_lon, data, weights, radius_m):
     if data.empty: return 0.0, {cat: 0.0 for cat in CATEGORY_GROUPS.keys()}, {cat: 0 for cat in CATEGORY_GROUPS.keys()}, [], {cat: 0.0 for cat in CATEGORY_GROUPS.keys()}
@@ -175,23 +190,40 @@ def calculate_seulsekwon_index(center_lat, center_lon, data, weights, radius_m):
 
     scores, counts, nearby, raw_scores = {}, {}, [], {}
     for g_name, sub_cats in CATEGORY_GROUPS.items():
-        # 대소문자 무시 및 부분 일치 검색 강화
         g_data = filtered[filtered['sub_category'].apply(lambda x: any(str(sc).lower() in str(x).lower() for sc in sub_cats))]
-        actual_count = 0
+        
+        # 그룹 내 임시 리스트 (거리 계산 후 중복 제거를 위해)
+        group_facilities = []
         for _, row in g_data.iterrows():
             dist = geodesic((center_lat, center_lon), (row['lat'], row['lon'])).meters
             if dist <= radius_m:
-                actual_count += 1
                 r_dict = row.to_dict(); r_dict['distance'] = dist; r_dict['group'] = g_name
                 r_dict['emoji'] = next((emoji for key, emoji in EMOJI_MAP.items() if key in str(row['sub_category'])), "📍")
-                nearby.append(r_dict)
-        counts[g_name] = actual_count
+                group_facilities.append(r_dict)
+        
+        # --- 이름 및 유사 거리 기반 중복 제거 ---
+        # 1. 거리순 정렬
+        group_facilities = sorted(group_facilities, key=lambda x: x['distance'])
+        final_group_facilities = []
+        
+        for item in group_facilities:
+            # 같은 이름 && 거리 차이가 5m 이내인 시설이 이미 있는지 확인
+            is_dup = any(
+                item['name'] == other['name'] and abs(item['distance'] - other['distance']) < 5.0 
+                for other in final_group_facilities
+            )
+            if not is_dup:
+                final_group_facilities.append(item)
+        
+        counts[g_name] = len(final_group_facilities)
+        nearby.extend(final_group_facilities)
+        
         m = max_counts.get(g_name, 5)
-        rate = min(actual_count, m) / m
+        rate = min(counts[g_name], m) / m
         raw_scores[g_name] = rate
         scores[g_name] = round(rate * weights.get(g_name, 0), 2)
     
-    # 가까운 시설 우선 표시를 위해 거리순 정렬
+    # 전체 리스트 거리순 최종 정렬
     nearby = sorted(nearby, key=lambda x: x['distance'])
     
     total = round(sum(scores.values()), 1)
@@ -200,6 +232,7 @@ def calculate_seulsekwon_index(center_lat, center_lon, data, weights, radius_m):
 def create_visualizations(total_score, scores, counts, facilities, dong_name, raw_scores):
     layout_opts = dict(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(family="Inter", color=SECONDARY_COLOR))
     
+    # 1. 레이더 차트 (달성률 %)
     fig_radar = go.Figure()
     fig_radar.add_trace(go.Scatterpolar(
         r=[v * 100 for v in raw_scores.values()] + [list(raw_scores.values())[0] * 100],
@@ -209,33 +242,56 @@ def create_visualizations(total_score, scores, counts, facilities, dong_name, ra
         line=dict(color=ACCENT_COLOR, width=3),
         name='카테고리 달성률'
     ))
-
     fig_radar.update_layout(
-        polar=dict(
-            radialaxis=dict(
-                visible=True,
-                range=[0, 100],
-                tickvals=[0, 25, 50, 75, 100],
-                ticktext=["0%", "25%", "50%", "75%", "100%"]
-            )
-        ),
-        showlegend=False,
-        **layout_opts
+        polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickvals=[0, 25, 50, 75, 100], ticktext=["0%", "25%", "50%", "75%", "100%"])),
+        showlegend=False, **layout_opts
     )
     
+    # 2. 게이지 차트 (종합 점수)
     fig_gauge = go.Figure(go.Indicator(
         mode="gauge+number", value=total_score, title={'text': "슬세권 종합 지수"},
         gauge={'axis': {'range': [0, 100]}, 'bar': {'color': ACCENT_COLOR},
                'steps': [{'range': [0, 70], 'color': "#fee2e2"}, {'range': [70, 85], 'color': "#fef3c7"}, {'range': [85, 100], 'color': "#dcfce7"}]}
     ))
-    fig_gauge.update_layout(height=300, **layout_opts)
+    fig_gauge.update_layout(height=280, margin=dict(t=50, b=10, l=30, r=30), **layout_opts)
     
-    fig_compare = px.bar(x=[f"'{dong_name}'", "서울 평균"], y=[total_score, 75.5], color=[f"'{dong_name}'", "서울 평균"],
-                         color_discrete_map={f"'{dong_name}'": PRIMARY_COLOR, "서울 평균": "#cbd5e1"})
-    fig_compare.update_layout(showlegend=False, height=300, **layout_opts)
+    # 3. 인프라 구성 비교 (100% 누적 바 차트: 행정동 평균 vs 서울시 전체 평균)
+    # 서울시 전체 평균 (단순 점수가 아닌 구성 비중 비중으로 사용)
+    seoul_avg_raw = {"생활/편의🏪": 22.5, "교통🚌": 15.0, "의료💊": 11.5, "안전/치안🚨": 8.0, "교육/문화📚": 3.5, "자연/여가🌳": 11.0, "금융🏦": 4.0}
+    seoul_total = sum(seoul_avg_raw.values())
+    seoul_percent = {k: (v / seoul_total) * 100 for k, v in seoul_avg_raw.items()}
     
-    fig_pie = px.pie(names=list(counts.keys()), values=list(counts.values()), hole=.6)
-    fig_pie.update_layout(height=300, showlegend=True, legend=dict(orientation="h", y=-0.2), **layout_opts)
+    # 해당 행정동 비중 (현재 분석 지점 기준 정규화)
+    dong_total = sum(scores.values()) if sum(scores.values()) > 0 else 1
+    dong_percent = {k: (v / dong_total) * 100 for k, v in scores.items()}
+    
+    categories = list(scores.keys())
+    fig_compare = go.Figure()
+    
+    for cat in categories:
+        fig_compare.add_trace(go.Bar(
+            name=cat,
+            x=[f"검색지 평균", "서울시 전체 평균"],
+            y=[dong_percent[cat], seoul_percent[cat]],
+            text=f"{cat}",
+            hovertemplate="%{x}<br>%{text}: %{y:.1f}%<extra></extra>"
+        ))
+    
+    fig_compare.update_layout(
+        barmode='stack',
+        height=400,
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.2, xanchor="center", x=0.5),
+        yaxis=dict(ticksuffix="%", range=[0, 100]),
+        margin=dict(t=30, b=100, l=10, r=10),
+        **layout_opts
+    )
+    
+    # 4. 인프라 밸런스 도넛 차트 (현재 위치 비중)
+    fig_pie = px.pie(names=list(scores.keys()), values=list(scores.values()), hole=.6,
+                     color_discrete_sequence=px.colors.qualitative.Pastel)
+    fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+    fig_pie.update_layout(height=350, showlegend=False, margin=dict(t=30, b=30, l=10, r=10), **layout_opts)
     
     return {'radar': fig_radar, 'gauge': fig_gauge, 'compare': fig_compare, 'pie': fig_pie}
 
@@ -267,7 +323,7 @@ if 'data' not in st.session_state:
 # 초기 세션 상태 설정
 state_init = {
     'coords': (37.5006, 127.0363), 'address': "역삼역", 'radius': 500,
-    'weights': {"생활/편의🏪": 30, "교통🚌": 20, "의료💊": 15, "안전/치안🚨": 10, "교육/문화📚": 5, "자연/여가🌳": 15, "금융🏦": 5}
+    'weights': DEFAULT_WEIGHTS.copy()
 }
 for k, v in state_init.items():
     if k not in st.session_state: st.session_state[k] = v
@@ -293,11 +349,37 @@ if submit and query:
 if st.session_state.address:
     with st.sidebar:
         st.header("⚖️ 인프라 가중치 조정")
-        with st.form("custom_weights"):
-            new_w = {cat: st.slider(cat, 0, 50, val) for cat, val in st.session_state.weights.items()}
-            if st.form_submit_button("가중치 즉각 적용"):
-                st.session_state.weights = new_w; st.rerun()
-        st.success(f"데이터셋: {len(st.session_state.data):,}건 로드됨")
+        
+        # 가중치 초기화 버튼
+        if st.button("🔄 가중치 초기화 ↺", use_container_width=True, help="모든 가중치를 초기 설정값으로 되돌립니다."):
+            st.session_state.weights = DEFAULT_WEIGHTS.copy()
+            st.rerun()
+
+        st.markdown("---")
+        
+        # 실시간 가중치 조정
+        temp_weights = {}
+        for cat, val in st.session_state.weights.items():
+            temp_weights[cat] = st.slider(cat, 0, 50, val, step=5, key=f"slide_{cat}")
+        
+        current_total = sum(temp_weights.values())
+        
+        # 상태 표시기
+        if current_total == 100:
+            st.success(f"✅ 합계: {current_total} / 100")
+            if temp_weights != st.session_state.weights:
+                st.session_state.weights = temp_weights
+                st.rerun()
+        else:
+            diff = 100 - current_total
+            if diff > 0:
+                st.warning(f"⚠️ 합계: {current_total} ( 부족: {diff} )")
+            else:
+                st.error(f"❌ 합계: {current_total} ( 초과: {abs(diff)} )")
+            st.info("💡 분석을 위해 가중치의 총합을 100으로 맞추어 주세요.")
+
+        st.markdown("---")
+        st.caption(f"📊 로드된 데이터: {len(st.session_state.data):,}건")
         if st.button("🔄 엔진 재부팅 (캐시 삭제)"):
             st.cache_data.clear(); st.rerun()
 
